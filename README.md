@@ -40,7 +40,26 @@ https://github.com/user-attachments/assets/b7e9e72d-6e8c-4092-9d88-606186e82b8c
 
 ### 4. TODO list
 
-* [ ] Make Real-world deployment code
+### 4. Real-world Route-B deployment
+
+The first Go2 real deployment path for the MuJoCo-tested parkour depth policy is in:
+
+```bash
+docs/go2_parkour_real_deploy.md
+```
+
+Main commands:
+
+```bash
+./scripts/prepare_go2_parkour_assets.sh
+./scripts/build_go2_parkour_ctrl.sh
+./scripts/real_go2_parkour_depth_server.sh
+./scripts/real_go2_parkour_depth_ctrl.sh <network-interface>
+```
+
+### 5. TODO list
+
+* [x] Make first Route-B real-world deployment code
 
 
 ### Acknowledgement

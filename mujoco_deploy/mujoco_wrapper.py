@@ -5,7 +5,11 @@ from mujoco_deploy.mujoco_sensors.mujoco_contact_sensor import MujocoContactSens
 from mujoco_deploy.mujoco_sensors.mujoco_depth_camera import MujocoDepthCamera
 from isaaclab.utils.math  import euler_xyz_from_quat, wrap_to_pi
 from mujoco_deploy.mujoco_env import MujocoEnv
-from mujoco_deploy.mujoco_sensors.mujoco_joystick_controller import MujocoJoystick
+from mujoco_deploy.mujoco_sensors.mujoco_joystick_controller import (
+    FixedVelocityCommand,
+    KeyboardVelocityCommand,
+    MujocoJoystick,
+)
 import copy, cv2, torchvision
 from core.utils import isaac_to_mujoco, mujoco_to_isaac, stand_down_joint_pos
 import math
@@ -24,9 +28,17 @@ class MujocoWrapper():
         agent_cfg,
         model_xml_path:str,
         use_camera: bool,
+        use_joystick: bool = False,
+        use_keyboard: bool = False,
+        command_x: float | None = None,
+        show_depth: bool = False,
         ):
         self._mujoco_env = MujocoEnv(env_cfg, model_xml_path, use_camera)
         self._use_camera = use_camera
+        self._use_joystick = use_joystick
+        self._use_keyboard = use_keyboard
+        self._command_x = command_x
+        self._show_depth = show_depth
         self.device = self._mujoco_env.articulation.device
         self.common_step_counter = 0 
         self.decimation = env_cfg.decimation 
@@ -42,7 +54,14 @@ class MujocoWrapper():
         self._init_action_buffers()
 
     def _init_commands(self):
-        self._joystick = MujocoJoystick(self._mujoco_env.env_cfg, self.device)
+        if self._use_joystick and self._use_keyboard:
+            raise ValueError("Use only one command input: --use_joystick or --keyboard_control")
+        if self._use_joystick:
+            self._joystick = MujocoJoystick(self._mujoco_env.env_cfg, self.device)
+        elif self._use_keyboard:
+            self._joystick = KeyboardVelocityCommand(self.device, self._command_x)
+        else:
+            self._joystick = FixedVelocityCommand(self._mujoco_env.env_cfg, self.device, self._command_x)
         self._joystick.start_listening()
 
     def _init_sensors(self):
@@ -57,7 +76,8 @@ class MujocoWrapper():
             self._depth_camera = MujocoDepthCamera(self._mujoco_env.env_cfg, 
                     self._mujoco_env.articulation.device,
                     self._mujoco_env.model, 
-                    self._mujoco_env.data)
+                    self._mujoco_env.data,
+                    show_window=self._show_depth)
             self._sensor_term.append(self._depth_camera)
             self.clipping_range = self._depth_camera.sensor_cfg.max_distance
             self.resize_transform = torchvision.transforms.Resize(
@@ -79,7 +99,7 @@ class MujocoWrapper():
         self._action_history_length = joint_pos_cfg.history_length
         self._delay_update_global_steps = int(joint_pos_cfg.delay_update_global_steps)
         self._use_delay = joint_pos_cfg.use_delay
-        self._action_delay_steps = joint_pos_cfg.action_delay_steps
+        self._action_delay_steps = list(joint_pos_cfg.action_delay_steps)
         self._action_history_buf = th.zeros(1, self._action_history_length, self._mujoco_env.articulation.num_motor, device=self.device, dtype=th.float)
         self._actions = th.zeros(1, self._mujoco_env.articulation.num_motor, device=self.device)
         self._processed_actions = th.zeros(1, self._mujoco_env.articulation.num_motor, device=self.device)
@@ -122,17 +142,59 @@ class MujocoWrapper():
                 processed_action_np = self._init_actions.detach().cpu().numpy()
                 self._mujoco_env.step(processed_action_np)
 
-    def reset(self):
+    def _reset_common(self):
         self.common_step_counter = 0
         self._mujoco_env.reset()
-        self.episode_length_buf = th.zeros(1, device=self.device, dtype=th.long)
+        self._init_action_buffers()
         for i in range(100):
             self._mujoco_env.step()
+
+    def reset(self):
+        self._reset_common()
         self._init_pose_stand_down()
         self._init_pose_stand_up()
         self.sensor_update()
         self.sensor_render()
         print('[INFO] Initial posture setting complete')
+
+    def reset_passive(self):
+        self._reset_common()
+        self._init_pose_stand_down()
+        self.sensor_update()
+        self.sensor_render()
+        print('[INFO] Passive posture ready')
+
+    def stand_up(self):
+        self._init_pose_stand_up()
+        self.sensor_update()
+        self.sensor_render()
+        print('[INFO] FixStand posture ready')
+
+    def stand_down(self):
+        self._init_pose_stand_down()
+        self.sensor_update()
+        self.sensor_render()
+        print('[INFO] Returned to Passive posture')
+
+    def hold_stand_step(self):
+        self._hold_pose_step(self._mujoco_env.default_joint_pose)
+
+    def hold_passive_step(self):
+        self._hold_pose_step(self._stand_down_joint_pos)
+
+    def _hold_pose_step(self, target_pose: th.Tensor):
+        self._processed_actions = target_pose
+        for _ in range(self.decimation):
+            self._apply_action()
+            applied_effort_np = self._applied_effort.detach().cpu().numpy()
+            self._mujoco_env.step(applied_effort_np)
+            self.sensor_render()
+            self.sensor_update()
+
+    def pop_command_key(self):
+        if hasattr(self._joystick, "pop_key"):
+            return self._joystick.pop_key()
+        return None
 
     def get_observations(self):
         self.roll, self.pitch, yaw = euler_xyz_from_quat(self._mujoco_env.articulation.root_quat_w)
@@ -207,8 +269,13 @@ class MujocoWrapper():
         if self.common_step_counter % 5 ==0:
             self.depth_buffer[0] = th.cat([self.depth_buffer[0, 1:], 
                                     processed_image.to(self.device).unsqueeze(0)], dim=0)
-            cv2.imshow('processed_image',processed_image.detach().cpu().numpy())
-            cv2.waitKey(1)
+            if self._show_depth:
+                try:
+                    cv2.imshow('processed_image', processed_image.detach().cpu().numpy())
+                    cv2.waitKey(1)
+                except cv2.error as exc:
+                    self._show_depth = False
+                    print(f"[WARN] OpenCV processed-image window disabled: {exc}")
         return self.depth_buffer[:, -2].to(self.device)
     
     def _get_contact_fill(
@@ -315,5 +382,6 @@ class MujocoWrapper():
         return 1
 
     def close(self):
+        if hasattr(self, "_joystick") and hasattr(self._joystick, "close"):
+            self._joystick.close()
         self._mujoco_env.close()
-

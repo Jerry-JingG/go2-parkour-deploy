@@ -1,0 +1,37 @@
+FSM:
+  _:
+    Passive:
+      id: 1
+    FixStand:
+      id: 2
+    Policy:
+      id: 3
+      type: RLBase
+  Passive:
+    transitions:
+      FixStand: LT + A.on_pressed
+    keyboard_transitions:
+      FixStand: ["0"]
+    mode: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+    kd: [3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3]
+  FixStand:
+    transitions:
+      Passive: LT + B.on_pressed
+      Policy: start.on_pressed
+    keyboard_transitions:
+      Passive: ["p", "9"]
+      Policy: ["1"]
+    kp: [60, 80, 80, 60, 80, 80, 60, 80, 80, 60, 80, 80]
+    kd: [5, 4, 4, 5, 4, 4, 5, 4, 4, 5, 4, 4]
+    ts: [0, 1, 2]
+    qs: [
+      [],
+      [0.0473455, 1.22187, -2.44375, -0.0473455, 1.22187, -2.44375, 0.0473455, 1.22187, -2.44375, -0.0473455, 1.22187, -2.44375],
+      [-0.1, 0.8, -1.5, 0.1, 0.8, -1.5, -0.1, 1.0, -1.5, 0.1, 1.0, -1.5],
+    ]
+  Policy:
+    transitions:
+      Passive: LT + B.on_pressed
+    keyboard_transitions:
+      Passive: ["p", "9"]
+    policy_dir: config/policy/parkour_depth

@@ -1,9 +1,14 @@
-import os 
+import os
+import sys
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 import parkour_isaaclab
 from scripts.utils import load_local_cfg
 from core.deployment_player import DeploymentPlayer
 # import multiprocessing as mp
-import sys
 
 def main(args):
     """Play with RSL-RL agent."""
@@ -22,6 +27,11 @@ def main(args):
         agent_cfg = agent_cfg, 
         network_interface= args.interface,
         logs_path = logs_path, 
+        use_joystick=args.use_joystick,
+        use_keyboard=args.keyboard_control,
+        command_x=args.command_x,
+        show_depth=args.show_depth,
+        manual_start=args.keyboard_control,
     )
     
     player.reset(maximum_iteration = args.n_eval)
@@ -42,6 +52,9 @@ if __name__ == "__main__":
     parser.add_argument("--expid", type=str, default='2025-09-03_12-07-56')
     parser.add_argument("--interface", type=str, default='lo')
     parser.add_argument("--use_joystick", action='store_true', default=False)
+    parser.add_argument("--keyboard_control", action='store_true', default=False)
+    parser.add_argument("--command_x", type=float, default=None)
+    parser.add_argument("--show_depth", action='store_true', default=False)
     parser.add_argument("--n_eval", type=int, default=10)
     args = parser.parse_args()
     main(args)

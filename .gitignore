@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+.vscode/
+real_deploy/logs/
+real_deploy/unitree_rl_lab/deploy/robots/go2/build/
+real_deploy/realsense_depth_streamer

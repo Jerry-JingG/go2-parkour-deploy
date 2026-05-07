@@ -18,12 +18,14 @@ class MujocoDepthCamera(MujocoBaseSensor):
                  env_cfg, 
                  device,
                  model:mujoco.MjModel, 
-                 data:mujoco.MjData 
+                 data:mujoco.MjData,
+                 show_window: bool = False,
                  ):
         super().__init__(env_cfg)
         self._camera_data = CameraData()
         self._cam_name = 'd435i_camera' 
         self._device = device
+        self._show_window = show_window
         self.sensor_cfg = env_cfg.scene.depth_camera
         self._data = data
         self._model = model
@@ -95,10 +97,17 @@ class MujocoDepthCamera(MujocoBaseSensor):
         self._camera_data.intrinsic_matrices[:, 1, 2] = c_y
 
     def render(self, viewer):
+        if not self._show_window:
+            return
         for key, item in self._camera_data.output.items():
             image = item.detach().cpu().numpy()
-            cv2.imshow(key, image)
-        cv2.waitKey(1)
+            try:
+                cv2.imshow(key, image)
+                cv2.waitKey(1)
+            except cv2.error as exc:
+                self._show_window = False
+                print(f"[WARN] OpenCV window disabled: {exc}")
+                return
 
     @property
     def sensor_data(self) -> CameraData:

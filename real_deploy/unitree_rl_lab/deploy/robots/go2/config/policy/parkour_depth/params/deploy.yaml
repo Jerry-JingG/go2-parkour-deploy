@@ -1,0 +1,38 @@
+joint_ids_map: [3, 0, 9, 6, 4, 1, 10, 7, 5, 2, 11, 8]
+step_dt: 0.02
+stiffness: [40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 40.0]
+damping: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+default_joint_pos: [0.1, -0.1, 0.1, -0.1, 0.8, 0.8, 1.0, 1.0, -1.5, -1.5, -1.5, -1.5]
+
+socket_path: /tmp/go2_parkour_depth.sock
+socket_input_name: obs
+socket_action_dim: 12
+
+parkour:
+  command_ramp_rate: 0.35
+  foot_force_threshold: 2.0
+
+commands:
+  base_velocity:
+    ranges:
+      lin_vel_x: [0.0, 0.35]
+
+keyboard_velocity:
+  enabled: false
+  step: [0.05, 0.0, 0.0]
+  limit: [0.35, 0.0, 0.0]
+
+actions:
+  JointPositionAction:
+    clip: null
+    joint_names: [.*]
+    scale: [0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25]
+    offset: [0.1, -0.1, 0.1, -0.1, 0.8, 0.8, 1.0, 1.0, -1.5, -1.5, -1.5, -1.5]
+    joint_ids: null
+
+observations:
+  parkour_proprio:
+    params: {}
+    clip: [-100.0, 100.0]
+    scale: null
+    history_length: 1
