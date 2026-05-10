@@ -86,6 +86,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--depth_update_interval", type=int, default=5)
     parser.add_argument("--depth_rotate", type=int, default=0, choices=[0, 90, 180, 270])
     parser.add_argument("--depth_flip", type=str, default="none", choices=["none", "horizontal", "vertical", "both"])
+    parser.add_argument(
+        "--depth_zero_policy",
+        type=str,
+        default="near",
+        choices=["near", "far"],
+        help=(
+            "How to treat exact 0.0 depth pixels before resize/normalization. "
+            "'near' preserves the old behavior where 0 maps to -0.5; "
+            "'far' treats 0 as invalid and maps it to --depth_max_distance."
+        ),
+    )
     parser.add_argument("--num_prop", type=int, default=53)
     parser.add_argument("--num_scan", type=int, default=132)
     parser.add_argument("--num_priv_explicit", type=int, default=9)
@@ -335,6 +346,16 @@ def apply_depth_orientation(depth: np.ndarray, rotate: int, flip: str) -> np.nda
     return np.ascontiguousarray(depth)
 
 
+def apply_depth_zero_policy(depth: np.ndarray, policy: str, max_distance: float) -> np.ndarray:
+    if policy == "near":
+        return depth
+    if policy == "far":
+        depth = depth.copy()
+        depth[depth == 0.0] = max_distance
+        return depth
+    raise ValueError(f"Unsupported depth zero policy: {policy}")
+
+
 @dataclass
 class ParkourState:
     args: argparse.Namespace
@@ -375,6 +396,11 @@ class ParkourState:
     def preprocess_depth(self) -> torch.Tensor:
         depth_raw = np.array(self.depth_source.read_depth_m(), dtype=np.float32, copy=True)
         depth_np = apply_depth_orientation(depth_raw, self.args.depth_rotate, self.args.depth_flip)
+        depth_np = apply_depth_zero_policy(
+            depth_np,
+            self.args.depth_zero_policy,
+            self.args.depth_max_distance,
+        )
         depth_np = np.nan_to_num(
             depth_np,
             nan=self.args.depth_max_distance,
@@ -769,6 +795,7 @@ def main() -> None:
     print(f"Socket:        {args.socket_path}")
     print(f"Depth source:  {args.depth_source}")
     print(f"Device:        {device}")
+    print(f"Zero policy:   {args.depth_zero_policy}")
     if args.log_depth_dir:
         print(f"Depth log dir: {args.log_depth_dir}")
 

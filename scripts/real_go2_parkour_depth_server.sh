@@ -12,6 +12,7 @@ SOCKET_PATH="${SOCKET_PATH:-/tmp/go2_parkour_depth.sock}"
 CONDA_ENV="${CONDA_ENV:-Isaaclab}"
 PARKOUR_DEVICE="${PARKOUR_DEVICE:-auto}"
 DEPTH_SOURCE="${DEPTH_SOURCE:-realsense}"
+DEPTH_ZERO_POLICY="${DEPTH_ZERO_POLICY:-near}"
 ACTION_LPF_ALPHA="${ACTION_LPF_ALPHA:-0.5}"
 ACTION_DELTA_LIMIT="${ACTION_DELTA_LIMIT:-0.25}"
 
@@ -77,6 +78,7 @@ SERVER_ARGS=(
     --socket_path "$SOCKET_PATH"
     --device "$PARKOUR_DEVICE"
     --depth_source "$DEPTH_SOURCE"
+    --depth_zero_policy "$DEPTH_ZERO_POLICY"
     --action_lpf_alpha "$ACTION_LPF_ALPHA"
     --action_delta_limit "$ACTION_DELTA_LIMIT"
 )
@@ -117,6 +119,7 @@ echo "Socket:          $SOCKET_PATH"
 echo "Conda env:       $CONDA_ENV"
 echo "Device:          $PARKOUR_DEVICE"
 echo "Depth source:    $DEPTH_SOURCE"
+echo "Zero policy:     $DEPTH_ZERO_POLICY"
 echo "Action LPF:      $ACTION_LPF_ALPHA"
 echo "Action d-limit:  $ACTION_DELTA_LIMIT"
 if [ -n "${FOOT_FORCE_THRESHOLD:-}" ]; then

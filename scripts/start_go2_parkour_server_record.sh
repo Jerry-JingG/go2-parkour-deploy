@@ -22,6 +22,8 @@ echo "  $PARKOUR_LOG_CSV"
 echo "Recording parkour depth artifacts (npz + png):"
 echo "  $PARKOUR_LOG_DEPTH_DIR"
 echo "  steps: $PARKOUR_LOG_STEPS"
+echo "Depth zero policy:"
+echo "  ${DEPTH_ZERO_POLICY:-near}"
 echo ""
 
 exec "$ROOT_DIR/scripts/start_go2_parkour_server.sh"
