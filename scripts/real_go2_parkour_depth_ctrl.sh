@@ -11,6 +11,9 @@ GO2_CTRL="${GO2_CTRL:-$GO2_BUILD_DIR/go2_ctrl}"
 SOCKET_PATH="${SOCKET_PATH:-/tmp/go2_parkour_depth.sock}"
 NETWORK_INTERFACE="${1:-${NETWORK_INTERFACE:-eth0}}"
 KEYBOARD_CONTROL="${KEYBOARD_CONTROL:-}"
+STAND_RECORD_SECONDS="${STAND_RECORD_SECONDS:-5.0}"
+STAND_RECORD_KEY="${STAND_RECORD_KEY:-r}"
+STAND_RECORD_REMOTE_EXPR="${STAND_RECORD_REMOTE_EXPR:-LT + X.on_pressed}"
 
 if [ -z "$KEYBOARD_CONTROL" ]; then
     if [ "$NETWORK_INTERFACE" = "lo" ]; then
@@ -20,6 +23,9 @@ if [ -z "$KEYBOARD_CONTROL" ]; then
     fi
 fi
 export UNITREE_RL_LAB_KEYBOARD_CONTROL="$KEYBOARD_CONTROL"
+export PARKOUR_STAND_RECORD_SECONDS="$STAND_RECORD_SECONDS"
+export PARKOUR_STAND_RECORD_KEY="$STAND_RECORD_KEY"
+export PARKOUR_STAND_RECORD_REMOTE_EXPR="$STAND_RECORD_REMOTE_EXPR"
 
 echo "=== Go2 parkour depth controller ==="
 [ -x "$GO2_CTRL" ] || {
@@ -54,9 +60,11 @@ fi
 echo "Network interface: $NETWORK_INTERFACE"
 echo "Socket:            $SOCKET_PATH"
 echo "Keyboard control:  $KEYBOARD_CONTROL"
+echo "Stand record:      ${STAND_RECORD_SECONDS}s on remote '$STAND_RECORD_REMOTE_EXPR'"
 echo ""
 echo "Remote control:"
 echo "  LT/L2 + A   enter FixStand"
+echo "  LT/L2 + X   record FixStand obs/depth burst"
 echo "  Start       enter parkour policy"
 echo "  Left stick  forward velocity only"
 echo "  LT/L2 + B   Passive / stop policy"
@@ -67,6 +75,7 @@ if [ "$KEYBOARD_CONTROL" != "0" ]; then
     echo "  1           enter parkour policy"
     echo "  W/S         increase/decrease forward velocity"
     echo "  Space       zero velocity"
+    echo "  R           record FixStand obs/depth burst (backup)"
     echo "  P or 9      Passive / stop policy"
     echo ""
 fi

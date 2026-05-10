@@ -5,6 +5,7 @@ from mujoco_deploy.mujoco_sensors.mujoco_base_sensor import MujocoBaseSensor
 import numpy as np 
 from dataclasses import dataclass
 import mujoco, cv2
+from mujoco_deploy.depth_debug import save_depth_debug_image
 
 @dataclass
 class CameraData:
@@ -26,6 +27,8 @@ class MujocoDepthCamera(MujocoBaseSensor):
         self._cam_name = 'd435i_camera' 
         self._device = device
         self._show_window = show_window
+        self._save_window_fallback = False
+        self._fallback_notice_printed = False
         self.sensor_cfg = env_cfg.scene.depth_camera
         self._data = data
         self._model = model
@@ -42,6 +45,13 @@ class MujocoDepthCamera(MujocoBaseSensor):
         self._scene = mujoco.MjvScene(self._model, maxgeom=10_000)
         self._image = np.zeros((self.sensor_cfg.pattern_cfg.height, self.sensor_cfg.pattern_cfg.width, 3), dtype=np.uint8)
         self._depth_image = np.zeros((self.sensor_cfg.pattern_cfg.height, self.sensor_cfg.pattern_cfg.width, 1), dtype=np.float32)
+        rows, cols = th.meshgrid(
+            th.arange(self.sensor_cfg.pattern_cfg.height, device=self._device, dtype=th.float32),
+            th.arange(self.sensor_cfg.pattern_cfg.width, device=self._device, dtype=th.float32),
+            indexing='ij',
+        )
+        self._pixel_rows = rows
+        self._pixel_cols = cols
 
     def _create_buffers(self):
         self._camera_data.intrinsic_matrices = th.zeros((1, 3, 3), device=self._device)
@@ -70,20 +80,31 @@ class MujocoDepthCamera(MujocoBaseSensor):
     def _create_depth(self):
         self._renderer.update_scene(self._data, camera=self._cam_name)
         self._renderer.enable_depth_rendering()
-        self._depth_plane = self._renderer.render()
-        self._depth_plane = th.from_numpy(self._depth_plane).to(self._device)
-        i_indices, j_indices = th.meshgrid(th.arange(self.sensor_cfg.pattern_cfg.height).to(self._device), th.arange(self.sensor_cfg.pattern_cfg.width).to(self._device), indexing='ij')
-        x_camera = (i_indices - self._camera_data.intrinsic_matrices[0,0,2]) * \
-            self._depth_plane / self._camera_data.intrinsic_matrices[0,0,0]
-        y_camera = (j_indices - self._camera_data.intrinsic_matrices[0,1,2]) * \
-            self._depth_plane / self._camera_data.intrinsic_matrices[0,1,1]
-        self._depth_image = th.sqrt(self._depth_plane**2 + x_camera**2 + y_camera**2)
-        self._depth_image = self._depth_plane
+        self._depth_plane = th.from_numpy(self._renderer.render()).to(
+            device=self._device,
+            dtype=th.float32,
+        )
+        self._renderer.disable_depth_rendering()
+
+        depth_plane = th.nan_to_num(
+            self._depth_plane,
+            nan=float(self.sensor_cfg.max_distance),
+            posinf=float(self.sensor_cfg.max_distance),
+            neginf=0.0,
+        )
+        depth_plane = th.clamp(depth_plane, min=0.0)
+
+        fx = self._camera_data.intrinsic_matrices[0, 0, 0]
+        fy = self._camera_data.intrinsic_matrices[0, 1, 1]
+        cx = self._camera_data.intrinsic_matrices[0, 0, 2]
+        cy = self._camera_data.intrinsic_matrices[0, 1, 2]
+        x_camera = (self._pixel_cols - cx) * depth_plane / fx
+        y_camera = (self._pixel_rows - cy) * depth_plane / fy
+        self._depth_image = th.sqrt(depth_plane**2 + x_camera**2 + y_camera**2)
         if self.sensor_cfg.depth_clipping_behavior == "max":
             self._depth_image = th.clip(self._depth_image, max=self.sensor_cfg.max_distance)
         elif self.sensor_cfg.depth_clipping_behavior == "zero":
             self._depth_image[self._depth_image > self.sensor_cfg.max_distance] = 0.0
-        self._renderer.disable_depth_rendering()
         return self._depth_image.to(self._device)
     
     def _update_intrinsic_matrices(self):
@@ -97,17 +118,28 @@ class MujocoDepthCamera(MujocoBaseSensor):
         self._camera_data.intrinsic_matrices[:, 1, 2] = c_y
 
     def render(self, viewer):
-        if not self._show_window:
+        if not self._show_window and not self._save_window_fallback:
             return
         for key, item in self._camera_data.output.items():
             image = item.detach().cpu().numpy()
-            try:
-                cv2.imshow(key, image)
-                cv2.waitKey(1)
-            except cv2.error as exc:
-                self._show_window = False
-                print(f"[WARN] OpenCV window disabled: {exc}")
-                return
+            if self._show_window:
+                try:
+                    cv2.imshow(key, image)
+                    cv2.waitKey(1)
+                except cv2.error as exc:
+                    self._show_window = False
+                    self._save_window_fallback = True
+                    print(f"[WARN] OpenCV window disabled: {exc}")
+            if self._save_window_fallback:
+                output_path = save_depth_debug_image(
+                    key,
+                    image,
+                    vmin=0.0 if key == "distance_to_camera" else None,
+                    vmax=self.sensor_cfg.max_distance if key == "distance_to_camera" else None,
+                )
+                if output_path is not None and not self._fallback_notice_printed:
+                    print(f"[INFO] Writing latest depth debug image to: {output_path.parent}")
+                    self._fallback_notice_printed = True
 
     @property
     def sensor_data(self) -> CameraData:

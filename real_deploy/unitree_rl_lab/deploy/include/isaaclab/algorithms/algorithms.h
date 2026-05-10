@@ -130,7 +130,6 @@ public:
     : socket_path_(std::move(socket_path)), input_name_(std::move(input_name)), action_dim_(action_dim)
     {
         action.resize(action_dim_, 0.0f);
-        connect_socket();
     }
 
     ~SocketRunner()
@@ -240,6 +239,9 @@ private:
 
     std::vector<float> request_once(const std::vector<float>& input)
     {
+        if (fd_ < 0) {
+            connect_socket();
+        }
         const uint32_t n_in = static_cast<uint32_t>(input.size());
         send_all(&n_in, sizeof(n_in));
         if (!input.empty()) {

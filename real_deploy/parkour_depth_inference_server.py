@@ -11,12 +11,37 @@ import struct
 import sys
 import threading
 import time
+import zlib
 from dataclasses import dataclass
 from typing import Iterable
 
 import numpy as np
 import torch
 import torch.nn.functional as F
+
+
+RAW_FOOT_FORCE_UNITREE_LABELS = ("fr", "fl", "rr", "rl")
+RAW_FOOT_FORCE_ISAAC_LABELS = ("fl", "fr", "rl", "rr")
+RAW_FOOT_FORCE_UNITREE_TO_ISAAC = (1, 0, 3, 2)
+RAW_FOOT_FORCE_DIM = len(RAW_FOOT_FORCE_UNITREE_LABELS)
+CSV_STAT_FIELDS = (
+    ["command_x", "action_min", "action_max", "foot_force_threshold"]
+    + [f"depth_yaw_{i:02d}" for i in range(2)]
+    + ["policy_obs_06", "policy_obs_07"]
+    + [f"terrain_flag_{i:02d}" for i in range(2)]
+    + [f"contact_obs_{i:02d}" for i in range(4)]
+    + [f"raw_foot_force_contact_{i:02d}" for i in range(4)]
+    + [f"raw_foot_force_unitree_{label}" for label in RAW_FOOT_FORCE_UNITREE_LABELS]
+    + [f"raw_foot_force_isaac_{label}" for label in RAW_FOOT_FORCE_ISAAC_LABELS]
+    + [f"raw_foot_force_est_unitree_{label}" for label in RAW_FOOT_FORCE_UNITREE_LABELS]
+    + [f"raw_foot_force_est_isaac_{label}" for label in RAW_FOOT_FORCE_ISAAC_LABELS]
+)
+CSV_PATH_FIELDS = (
+    "depth_capture_path",
+    "depth_policy_input_path",
+    "depth_capture_vis_path",
+    "depth_policy_input_vis_path",
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -70,7 +95,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--action_lpf_alpha", type=float, default=0.5)
     parser.add_argument("--action_delta_limit", type=float, default=0.25)
     parser.add_argument("--action_clip", type=float, default=4.8)
+    parser.add_argument("--foot_force_threshold", type=float, default=2.0)
     parser.add_argument("--log_csv", type=str, default=None)
+    parser.add_argument("--log_depth_dir", type=str, default=None)
     parser.add_argument("--log_steps", type=int, default=300)
     parser.add_argument("--self_test_steps", type=int, default=0)
     return parser.parse_args()
@@ -315,6 +342,7 @@ class ParkourState:
     depth_source: DepthSource
     policy: torch.jit.ScriptModule
     depth_encoder: torch.jit.ScriptModule
+    depth_logger: DepthArtifactLogger | None
 
     def __post_init__(self) -> None:
         h, w = self.args.depth_resize
@@ -328,6 +356,9 @@ class ParkourState:
         self.depth_latent: torch.Tensor | None = None
         self.depth_yaw = torch.zeros(1, 2, dtype=torch.float32, device=self.device)
         self.prev_action: torch.Tensor | None = None
+        self.prev_foot_contact_unitree = [False] * RAW_FOOT_FORCE_DIM
+        self._latest_depth_raw: np.ndarray | None = None
+        self._latest_depth_processed: np.ndarray | None = None
         self.step = 0
 
     def reset_temporal_state(self) -> None:
@@ -336,11 +367,14 @@ class ParkourState:
         self.depth_latent = None
         self.depth_yaw.zero_()
         self.prev_action = None
+        self.prev_foot_contact_unitree = [False] * RAW_FOOT_FORCE_DIM
+        self._latest_depth_raw = None
+        self._latest_depth_processed = None
         self.step = 0
 
     def preprocess_depth(self) -> torch.Tensor:
-        depth_np = self.depth_source.read_depth_m()
-        depth_np = apply_depth_orientation(depth_np, self.args.depth_rotate, self.args.depth_flip)
+        depth_raw = np.array(self.depth_source.read_depth_m(), dtype=np.float32, copy=True)
+        depth_np = apply_depth_orientation(depth_raw, self.args.depth_rotate, self.args.depth_flip)
         depth_np = np.nan_to_num(
             depth_np,
             nan=self.args.depth_max_distance,
@@ -356,25 +390,39 @@ class ParkourState:
             mode="bicubic",
             align_corners=False,
         ).squeeze(0).squeeze(0)
-        return depth / self.args.depth_max_distance - 0.5
+        depth = depth / self.args.depth_max_distance - 0.5
+        self._latest_depth_raw = depth_raw
+        self._latest_depth_processed = depth.detach().cpu().numpy().copy()
+        return depth
 
-    def current_depth_image(self) -> torch.Tensor:
+    def current_depth_image(self) -> tuple[torch.Tensor, dict[str, str]]:
+        depth_paths: dict[str, str] = {}
         if self.step % self.args.depth_update_interval == 0:
             processed = self.preprocess_depth()
             self.depth_buffer = torch.cat([self.depth_buffer[1:], processed.unsqueeze(0)], dim=0)
-        return self.depth_buffer[-2].unsqueeze(0)
+            if self.depth_logger is not None and self._latest_depth_raw is not None and self._latest_depth_processed is not None:
+                policy_input = self.depth_buffer[-2].detach().cpu().numpy().copy()
+                depth_paths = self.depth_logger.write(
+                    self.step,
+                    self._latest_depth_raw,
+                    self._latest_depth_processed,
+                    policy_input,
+                )
+        return self.depth_buffer[-2].unsqueeze(0), depth_paths
 
-    def build_observation(self, prop: torch.Tensor) -> torch.Tensor:
+    def build_observation(self, prop: torch.Tensor) -> tuple[torch.Tensor, dict[str, str]]:
+        depth_paths: dict[str, str] = {}
         if self.depth_latent is None or self.step % self.args.depth_update_interval == 0:
             prop_depth = prop.clone()
             prop_depth[:, 6:8] = 0.0
-            depth_latent_and_yaw = self.depth_encoder(self.current_depth_image(), prop_depth)
+            depth_image, depth_paths = self.current_depth_image()
+            depth_latent_and_yaw = self.depth_encoder(depth_image, prop_depth)
             self.depth_latent = depth_latent_and_yaw[:, :-2]
             self.depth_yaw = depth_latent_and_yaw[:, -2:]
 
         prop_policy = prop.clone()
         prop_policy[:, 6:8] = 1.5 * self.depth_yaw
-        return torch.cat(
+        obs = torch.cat(
             [
                 prop_policy,
                 self.dummy_scan,
@@ -384,6 +432,7 @@ class ParkourState:
             ],
             dim=1,
         ).clamp(-100.0, 100.0)
+        return obs, depth_paths
 
     def update_history(self, prop: torch.Tensor) -> None:
         prop_hist = prop.clone()
@@ -419,22 +468,204 @@ class ParkourState:
         self.prev_action = action.detach()
         return action
 
-    def infer(self, floats: Iterable[float]) -> tuple[list[float], dict[str, float]]:
-        prop = torch.tensor(list(floats), dtype=torch.float32, device=self.device).unsqueeze(0)
-        if prop.shape[1] != self.args.num_prop:
-            raise ValueError(f"expected {self.args.num_prop} proprio floats, got {prop.shape[1]}")
+    def infer(self, floats: Iterable[float]) -> tuple[list[float], dict[str, float], dict[str, str]]:
+        values = list(floats)
+        expected = self.args.num_prop
+        expected_with_est_forces = expected + RAW_FOOT_FORCE_DIM
+        expected_with_raw_and_est_forces = expected + 2 * RAW_FOOT_FORCE_DIM
+        if len(values) not in (expected, expected_with_est_forces, expected_with_raw_and_est_forces):
+            raise ValueError(
+                f"expected {expected} proprio floats, {expected_with_est_forces} with legacy foot force est, "
+                f"or {expected_with_raw_and_est_forces} with raw and estimated foot forces, "
+                f"got {len(values)}"
+            )
+
+        raw_foot_force_unitree = [float("nan")] * RAW_FOOT_FORCE_DIM
+        raw_foot_force_est_unitree = [float("nan")] * RAW_FOOT_FORCE_DIM
+        extras = values[expected:]
+        if len(extras) == RAW_FOOT_FORCE_DIM:
+            raw_foot_force_est_unitree = extras
+        elif len(extras) == 2 * RAW_FOOT_FORCE_DIM:
+            raw_foot_force_unitree = extras[:RAW_FOOT_FORCE_DIM]
+            raw_foot_force_est_unitree = extras[RAW_FOOT_FORCE_DIM:]
+
+        prop = torch.tensor(values[:expected], dtype=torch.float32, device=self.device).unsqueeze(0)
         with torch.inference_mode():
-            obs = self.build_observation(prop)
-            action = self.call_policy(obs).squeeze(0)
-            action = self.filter_action(action)
+            obs, depth_paths = self.build_observation(prop)
+            action_raw = self.call_policy(obs).squeeze(0)
+            action_filtered = self.filter_action(action_raw)
             self.update_history(prop)
         self.step += 1
+
+        depth_yaw = self.depth_yaw[0].detach().cpu().tolist()
+        policy_obs_6_8 = obs[0, 6:8].detach().cpu().tolist()
+        terrain_flag = prop[0, 11:13].detach().cpu().tolist()
+        contact_obs = prop[0, 49:53].detach().cpu().tolist()
+        raw_foot_force_isaac = [
+            raw_foot_force_unitree[idx] for idx in RAW_FOOT_FORCE_UNITREE_TO_ISAAC
+        ]
+        raw_foot_force_est_isaac = [
+            raw_foot_force_est_unitree[idx] for idx in RAW_FOOT_FORCE_UNITREE_TO_ISAAC
+        ]
+        contact_source_unitree = raw_foot_force_unitree
+        if not any(np.isfinite(value) for value in contact_source_unitree):
+            contact_source_unitree = raw_foot_force_est_unitree
+        if any(np.isfinite(value) for value in contact_source_unitree):
+            contact_unitree = [False] * RAW_FOOT_FORCE_DIM
+            for i, value in enumerate(contact_source_unitree):
+                current_contact = value > self.args.foot_force_threshold
+                contact_unitree[i] = current_contact or self.prev_foot_contact_unitree[i]
+                self.prev_foot_contact_unitree[i] = current_contact
+            raw_foot_force_contact = [
+                (1.0 if contact_unitree[idx] else 0.0) - 0.5
+                for idx in RAW_FOOT_FORCE_UNITREE_TO_ISAAC
+            ]
+        else:
+            raw_foot_force_contact = [float("nan")] * RAW_FOOT_FORCE_DIM
         stats = {
             "command_x": float(prop[0, 10].detach().cpu()),
-            "action_min": float(action.min().detach().cpu()),
-            "action_max": float(action.max().detach().cpu()),
+            "action_min": float(action_filtered.min().detach().cpu()),
+            "action_max": float(action_filtered.max().detach().cpu()),
+            "foot_force_threshold": float(self.args.foot_force_threshold),
+            "depth_yaw_00": float(depth_yaw[0]),
+            "depth_yaw_01": float(depth_yaw[1]),
+            "policy_obs_06": float(policy_obs_6_8[0]),
+            "policy_obs_07": float(policy_obs_6_8[1]),
+            "terrain_flag_00": float(terrain_flag[0]),
+            "terrain_flag_01": float(terrain_flag[1]),
         }
-        return action.detach().cpu().tolist(), stats
+        stats.update({f"contact_obs_{i:02d}": float(contact_obs[i]) for i in range(4)})
+        stats.update({f"raw_foot_force_contact_{i:02d}": float(raw_foot_force_contact[i]) for i in range(4)})
+        stats.update(
+            {
+                f"raw_foot_force_unitree_{label}": float(value)
+                for label, value in zip(RAW_FOOT_FORCE_UNITREE_LABELS, raw_foot_force_unitree)
+            }
+        )
+        stats.update(
+            {
+                f"raw_foot_force_isaac_{label}": float(value)
+                for label, value in zip(RAW_FOOT_FORCE_ISAAC_LABELS, raw_foot_force_isaac)
+            }
+        )
+        stats.update(
+            {
+                f"raw_foot_force_est_unitree_{label}": float(value)
+                for label, value in zip(RAW_FOOT_FORCE_UNITREE_LABELS, raw_foot_force_est_unitree)
+            }
+        )
+        stats.update(
+            {
+                f"raw_foot_force_est_isaac_{label}": float(value)
+                for label, value in zip(RAW_FOOT_FORCE_ISAAC_LABELS, raw_foot_force_est_isaac)
+            }
+        )
+        return action_filtered.detach().cpu().tolist(), stats, depth_paths
+
+
+class DepthArtifactLogger:
+    def __init__(self, root_dir: str | None, max_steps: int, depth_max_distance: float):
+        self._root_dir = root_dir
+        self._max_steps = max_steps
+        self._depth_max_distance = depth_max_distance
+        self._capture_dir: str | None = None
+        self._capture_vis_dir: str | None = None
+        self._policy_input_dir: str | None = None
+        self._policy_input_vis_dir: str | None = None
+        if root_dir:
+            self._capture_dir = os.path.join(root_dir, "capture")
+            self._capture_vis_dir = os.path.join(root_dir, "capture_vis")
+            self._policy_input_dir = os.path.join(root_dir, "policy_input")
+            self._policy_input_vis_dir = os.path.join(root_dir, "policy_input_vis")
+            os.makedirs(self._capture_dir, exist_ok=True)
+            os.makedirs(self._capture_vis_dir, exist_ok=True)
+            os.makedirs(self._policy_input_dir, exist_ok=True)
+            os.makedirs(self._policy_input_vis_dir, exist_ok=True)
+
+    def _depth_to_color(self, depth: np.ndarray) -> np.ndarray:
+        if self._depth_max_distance <= 0.0:
+            return np.zeros((*depth.shape, 3), dtype=np.uint8)
+        depth_m = np.asarray(depth, dtype=np.float32)
+        depth_m = np.nan_to_num(
+            depth_m,
+            nan=self._depth_max_distance,
+            posinf=self._depth_max_distance,
+            neginf=0.0,
+        )
+        depth_m = np.clip(depth_m, 0.0, self._depth_max_distance)
+        x = depth_m / self._depth_max_distance
+        r = np.clip(1.5 - np.abs(4.0 * x - 3.0), 0.0, 1.0)
+        g = np.clip(1.5 - np.abs(4.0 * x - 2.0), 0.0, 1.0)
+        b = np.clip(1.5 - np.abs(4.0 * x - 1.0), 0.0, 1.0)
+        return np.stack([r, g, b], axis=-1).astype(np.float32) * 255.0
+
+    def _normalized_depth_to_color(self, depth: np.ndarray) -> np.ndarray:
+        depth_m = (np.asarray(depth, dtype=np.float32) + 0.5) * self._depth_max_distance
+        return self._depth_to_color(depth_m)
+
+    def _write_png(self, path: str, image: np.ndarray) -> None:
+        rgb = np.asarray(image)
+        if rgb.ndim == 2:
+            rgb = np.stack([rgb, rgb, rgb], axis=-1)
+        if rgb.ndim != 3 or rgb.shape[2] not in (3, 4):
+            raise ValueError(f"Expected HxWx3 or HxWx4 image, got shape {rgb.shape}")
+        rgb = np.clip(rgb[..., :3], 0, 255).astype(np.uint8, copy=False)
+        rgb = np.ascontiguousarray(rgb)
+        height, width, _ = rgb.shape
+        raw = b"".join(b"\x00" + rgb[row].tobytes() for row in range(height))
+        compressed = zlib.compress(raw, level=6)
+
+        def chunk(tag: bytes, data: bytes) -> bytes:
+            return (
+                struct.pack("!I", len(data))
+                + tag
+                + data
+                + struct.pack("!I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+            )
+
+        header = struct.pack("!IIBBBBB", width, height, 8, 2, 0, 0, 0)
+        png = b"".join(
+            [
+                b"\x89PNG\r\n\x1a\n",
+                chunk(b"IHDR", header),
+                chunk(b"IDAT", compressed),
+                chunk(b"IEND", b""),
+            ]
+        )
+        with open(path, "wb") as f:
+            f.write(png)
+
+    def write(
+        self,
+        step: int,
+        raw_depth: np.ndarray,
+        processed_depth: np.ndarray,
+        policy_input: np.ndarray,
+    ) -> dict[str, str]:
+        if self._capture_dir is None or self._policy_input_dir is None or step >= self._max_steps:
+            return {}
+
+        capture_path = os.path.join(self._capture_dir, f"step_{step:06d}.npz")
+        capture_vis_path = os.path.join(self._capture_vis_dir, f"step_{step:06d}.png")
+        policy_input_path = os.path.join(self._policy_input_dir, f"step_{step:06d}.npz")
+        policy_input_vis_path = os.path.join(self._policy_input_vis_dir, f"step_{step:06d}.png")
+        np.savez_compressed(
+            capture_path,
+            raw_depth_m=np.asarray(raw_depth, dtype=np.float32),
+            processed_capture_depth=np.asarray(processed_depth, dtype=np.float32),
+        )
+        np.savez_compressed(
+            policy_input_path,
+            policy_depth_input=np.asarray(policy_input, dtype=np.float32),
+        )
+        self._write_png(capture_vis_path, self._depth_to_color(raw_depth))
+        self._write_png(policy_input_vis_path, self._normalized_depth_to_color(policy_input))
+        return {
+            "depth_capture_path": capture_path,
+            "depth_policy_input_path": policy_input_path,
+            "depth_capture_vis_path": capture_vis_path,
+            "depth_policy_input_vis_path": policy_input_vis_path,
+        }
 
 
 class CsvLogger:
@@ -448,17 +679,30 @@ class CsvLogger:
                 os.makedirs(log_dir, exist_ok=True)
             self._file = open(path, "w", newline="")
             fieldnames = (
-                ["step", "command_x", "action_min", "action_max"]
+                ["step"]
+                + CSV_STAT_FIELDS
+                + list(CSV_PATH_FIELDS)
                 + [f"obs_{i:02d}" for i in range(53)]
                 + [f"act_{i:02d}" for i in range(12)]
             )
             self._writer = csv.DictWriter(self._file, fieldnames=fieldnames)
             self._writer.writeheader()
 
-    def write(self, step: int, obs: tuple[float, ...], action: list[float], stats: dict[str, float]) -> None:
+    def write(
+        self,
+        step: int,
+        obs: tuple[float, ...],
+        action: list[float],
+        stats: dict[str, float],
+        depth_paths: dict[str, str] | None = None,
+    ) -> None:
         if self._writer is None or step >= self._max_steps:
             return
         row = {"step": step, **stats}
+        for field in CSV_PATH_FIELDS:
+            row[field] = ""
+        if depth_paths:
+            row.update(depth_paths)
         row.update({f"obs_{i:02d}": float(obs[i]) for i in range(min(len(obs), 53))})
         row.update({f"act_{i:02d}": float(action[i]) for i in range(min(len(action), 12))})
         self._writer.writerow(row)
@@ -484,10 +728,10 @@ def handle_connection(conn: socket.socket, state: ParkourState, logger: CsvLogge
         n_floats = struct.unpack("<I", header)[0]
         data = recv_exact(conn, n_floats * 4)
         floats = struct.unpack(f"<{n_floats}f", data)
-        action, stats = state.infer(floats)
+        action, stats, depth_paths = state.infer(floats)
         if len(action) != state.args.action_dim:
             raise ValueError(f"expected action_dim={state.args.action_dim}, got {len(action)}")
-        logger.write(state.step, floats, action, stats)
+        logger.write(state.step, floats, action, stats, depth_paths)
         response = struct.pack(f"<I{len(action)}f", len(action), *action)
         conn.sendall(response)
         if state.step % 200 == 0:
@@ -502,7 +746,7 @@ def run_self_test(state: ParkourState, steps: int) -> None:
     obs = [0.0] * state.args.num_prop
     obs[10] = 0.2
     for _ in range(steps):
-        action, stats = state.infer(obs)
+        action, stats, _ = state.infer(obs)
     print(
         f"Self-test OK: {steps} steps, action_dim={len(action)}, "
         f"action_min={stats['action_min']:.4f}, action_max={stats['action_max']:.4f}",
@@ -525,13 +769,16 @@ def main() -> None:
     print(f"Socket:        {args.socket_path}")
     print(f"Depth source:  {args.depth_source}")
     print(f"Device:        {device}")
+    if args.log_depth_dir:
+        print(f"Depth log dir: {args.log_depth_dir}")
 
     policy = load_torchscript(policy_path, device)
     depth_encoder = load_torchscript(depth_encoder_path, device)
     depth_source = make_depth_source(args)
     logger = CsvLogger(args.log_csv, args.log_steps)
+    depth_logger = DepthArtifactLogger(args.log_depth_dir, args.log_steps, args.depth_max_distance)
 
-    state = ParkourState(args, device, depth_source, policy, depth_encoder)
+    state = ParkourState(args, device, depth_source, policy, depth_encoder, depth_logger)
     if args.self_test_steps > 0:
         run_self_test(state, args.self_test_steps)
         depth_source.close()

@@ -36,3 +36,13 @@ observations:
     clip: [-100.0, 100.0]
     scale: null
     history_length: 1
+  parkour_raw_foot_force:
+    params: {}
+    clip: null
+    scale: null
+    history_length: 1
+  parkour_raw_foot_force_est:
+    params: {}
+    clip: null
+    scale: null
+    history_length: 1

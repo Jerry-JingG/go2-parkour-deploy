@@ -5,6 +5,7 @@
 
 #include <eigen3/Eigen/Dense>
 #include <yaml-cpp/yaml.h>
+#include <cstdlib>
 #include "isaaclab/manager/observation_manager.h"
 #include "isaaclab/manager/action_manager.h"
 #include "isaaclab/assets/articulation/articulation.h"
@@ -14,6 +15,20 @@
 
 namespace isaaclab
 {
+
+inline float env_float(const char* name, float fallback)
+{
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0') {
+        return fallback;
+    }
+    char* end = nullptr;
+    const float parsed = std::strtof(value, &end);
+    if (end == value) {
+        return fallback;
+    }
+    return parsed;
+}
 
 class ObservationManager;
 class ActionManager;
@@ -52,6 +67,7 @@ public:
         global_phase = 0;
         episode_length = 0;
         robot->update();
+        robot->data.foot_contact_prev = {0.0f, 0.0f, 0.0f, 0.0f};
         action_manager->reset();
         observation_manager->reset();
     }
@@ -63,6 +79,16 @@ public:
         auto obs = observation_manager->compute();
         auto action = alg->act(obs);
         action_manager->process_action(action);
+    }
+
+    void record_observation_only()
+    {
+        episode_length += 1;
+        robot->update();
+        auto obs = observation_manager->compute();
+        if (alg) {
+            (void)alg->act(obs);
+        }
     }
 
     float step_dt;

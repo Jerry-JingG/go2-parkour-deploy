@@ -32,6 +32,14 @@ def main(args):
         command_x=args.command_x,
         show_depth=args.show_depth,
         manual_start=args.keyboard_control,
+        record_csv=args.record_csv,
+        record_depth_dir=args.record_depth_dir,
+        record_depth_every=args.record_depth_every,
+        record_foot_force_threshold=args.record_foot_force_threshold,
+        action_lpf_alpha=args.action_lpf_alpha,
+        action_delta_limit=args.action_delta_limit,
+        action_clip=args.action_clip,
+        stand_record_seconds=args.stand_record_seconds,
     )
     
     player.reset(maximum_iteration = args.n_eval)
@@ -56,5 +64,13 @@ if __name__ == "__main__":
     parser.add_argument("--command_x", type=float, default=None)
     parser.add_argument("--show_depth", action='store_true', default=False)
     parser.add_argument("--n_eval", type=int, default=10)
+    parser.add_argument("--record_csv", type=str, default=None)
+    parser.add_argument("--record_depth_dir", type=str, default=None)
+    parser.add_argument("--record_depth_every", type=int, default=5)
+    parser.add_argument("--record_foot_force_threshold", type=float, default=2.0)
+    parser.add_argument("--action_lpf_alpha", type=float, default=0.5)
+    parser.add_argument("--action_delta_limit", type=float, default=0.25)
+    parser.add_argument("--action_clip", type=float, default=4.8)
+    parser.add_argument("--stand_record_seconds", type=float, default=5.0)
     args = parser.parse_args()
     main(args)

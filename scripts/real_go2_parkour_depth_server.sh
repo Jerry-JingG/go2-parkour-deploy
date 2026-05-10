@@ -96,8 +96,14 @@ fi
 if [ -n "${DEPTH_CONNECT_TIMEOUT_S:-}" ]; then
     SERVER_ARGS+=(--depth_connect_timeout_s "$DEPTH_CONNECT_TIMEOUT_S")
 fi
+if [ -n "${FOOT_FORCE_THRESHOLD:-}" ]; then
+    SERVER_ARGS+=(--foot_force_threshold "$FOOT_FORCE_THRESHOLD")
+fi
 if [ -n "${PARKOUR_LOG_CSV:-}" ]; then
     SERVER_ARGS+=(--log_csv "$PARKOUR_LOG_CSV" --log_steps "${PARKOUR_LOG_STEPS:-300}")
+fi
+if [ -n "${PARKOUR_LOG_DEPTH_DIR:-}" ]; then
+    SERVER_ARGS+=(--log_depth_dir "$PARKOUR_LOG_DEPTH_DIR")
 fi
 if [ -n "${DEPTH_ROTATE:-}" ]; then
     SERVER_ARGS+=(--depth_rotate "$DEPTH_ROTATE")
@@ -113,6 +119,12 @@ echo "Device:          $PARKOUR_DEVICE"
 echo "Depth source:    $DEPTH_SOURCE"
 echo "Action LPF:      $ACTION_LPF_ALPHA"
 echo "Action d-limit:  $ACTION_DELTA_LIMIT"
+if [ -n "${FOOT_FORCE_THRESHOLD:-}" ]; then
+    echo "Foot threshold:  $FOOT_FORCE_THRESHOLD"
+fi
+if [ -n "${PARKOUR_LOG_DEPTH_DIR:-}" ]; then
+    echo "Depth log dir:   $PARKOUR_LOG_DEPTH_DIR"
+fi
 echo "Ctrl+C to stop."
 echo ""
 

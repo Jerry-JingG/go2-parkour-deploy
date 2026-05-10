@@ -4,6 +4,7 @@
 #pragma once
 
 #include <array>
+#include <vector>
 #include <eigen3/Eigen/Dense>
 #include "unitree/dds_wrapper/common/unitree_joystick.hpp"
 
@@ -44,8 +45,17 @@ struct ArticulationData
     bool use_velocity_command_override = false;
     std::array<float, 3> velocity_command_override = {0.0f, 0.0f, 0.0f};
 
+    std::array<float, 4> foot_force = {0.0f, 0.0f, 0.0f, 0.0f};
     std::array<float, 4> foot_force_est = {0.0f, 0.0f, 0.0f, 0.0f};
+    std::array<float, 4> foot_contact_prev = {0.0f, 0.0f, 0.0f, 0.0f};
     float parkour_command_x = 0.0f;
+
+    std::array<float, 3> sdk_imu_gyro = {0.0f, 0.0f, 0.0f};
+    std::array<float, 4> sdk_imu_quat_wxyz = {1.0f, 0.0f, 0.0f, 0.0f};
+    std::array<float, 12> sdk_joint_pos = {0.0f};
+    std::array<float, 12> sdk_joint_vel = {0.0f};
+    std::array<float, 4> sdk_foot_force = {0.0f, 0.0f, 0.0f, 0.0f};
+    std::array<float, 4> sdk_foot_force_est = {0.0f, 0.0f, 0.0f, 0.0f};
 };
 
 class Articulation

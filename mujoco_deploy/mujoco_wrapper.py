@@ -10,7 +10,8 @@ from mujoco_deploy.mujoco_sensors.mujoco_joystick_controller import (
     KeyboardVelocityCommand,
     MujocoJoystick,
 )
-import copy, cv2, torchvision
+from mujoco_deploy.depth_debug import save_depth_debug_image
+import copy, cv2, os, torchvision
 from core.utils import isaac_to_mujoco, mujoco_to_isaac, stand_down_joint_pos
 import math
 
@@ -39,6 +40,10 @@ class MujocoWrapper():
         self._use_keyboard = use_keyboard
         self._command_x = command_x
         self._show_depth = show_depth
+        self._terrain_is_flat = self._infer_terrain_is_flat(model_xml_path)
+        self._save_processed_depth_fallback = False
+        self._processed_fallback_notice_printed = False
+        self._last_depth_trace = None
         self.device = self._mujoco_env.articulation.device
         self.common_step_counter = 0 
         self.decimation = env_cfg.decimation 
@@ -110,6 +115,24 @@ class MujocoWrapper():
         self._priv_explicit = th.zeros(1, self._agent_cfg.estimator.num_priv_explicit, device=self.device, dtype=th.float32)
         self._priv_latent = th.zeros(1, self._agent_cfg.estimator.num_priv_latent, device=self.device, dtype=th.float32)
         self._dummy_scan = th.zeros(1, self._agent_cfg.estimator.num_scan, device=self.device, dtype=th.float32)
+        self._terrain_flag = th.tensor(
+            [[0.0, 1.0] if self._terrain_is_flat else [1.0, 0.0]],
+            device=self.device,
+            dtype=th.float32,
+        )
+
+    @staticmethod
+    def _infer_terrain_is_flat(model_xml_path: str) -> bool:
+        terrain_mode = (
+            os.environ.get("MUJOCO_TERRAIN_MODE")
+            or os.environ.get("MUJOCO_SCENE")
+            or ""
+        ).strip().lower()
+        if terrain_mode in {"flat", "parkour_flat"}:
+            return True
+        if terrain_mode in {"parkour", "non-flat", "nonflat"}:
+            return False
+        return "flat" in os.path.basename(model_xml_path).lower()
 
     def _init_pose_stand_up(self):
         runing_time = 0.0
@@ -203,8 +226,6 @@ class MujocoWrapper():
                         if not self._use_camera  else\
                         self._dummy_scan
         height_scan = th.clip(height_scan, -1, 1).to(self.device)
-        env_idx_tensor = th.tensor([True]).to(dtype = th.bool, device=self.device)
-        invert_env_idx_tensor = ~env_idx_tensor
         commands = self._joystick.velocity_cmd
         self._delta_next_yaw[:] = self._delta_yaw[:] = wrap_to_pi(yaw)[:,None]
         obs_buf = th.cat((
@@ -215,8 +236,7 @@ class MujocoWrapper():
                             self._delta_next_yaw,
                             0*commands[:, 0:2], 
                             commands[:, 0:1],  #[1,1]
-                            env_idx_tensor.float()[:, None],
-                            invert_env_idx_tensor.float()[:, None],
+                            self._terrain_flag,
                             self._mujoco_env.articulation.joint_pos - self._mujoco_env.default_joint_pose,
                             self._mujoco_env.articulation.joint_vel* 0.05,
                             self._action_history_buf[:, -1],
@@ -251,8 +271,7 @@ class MujocoWrapper():
         return depth_image
     
     def _crop_depth_image(self, depth_image):
-        # crop 30 pixels from the left and right and and 20 pixels from bottom and return croped image
-        return depth_image[:-2, 4:-4]
+        return depth_image
     
     def _normalize_depth_image(self, depth_image):
         depth_image = (depth_image) / (self.clipping_range)  - 0.5
@@ -275,8 +294,33 @@ class MujocoWrapper():
                     cv2.waitKey(1)
                 except cv2.error as exc:
                     self._show_depth = False
+                    self._save_processed_depth_fallback = True
                     print(f"[WARN] OpenCV processed-image window disabled: {exc}")
-        return self.depth_buffer[:, -2].to(self.device)
+            if self._save_processed_depth_fallback:
+                output_path = save_depth_debug_image(
+                    "processed_image",
+                    processed_image.detach().cpu().numpy(),
+                    vmin=-0.5,
+                    vmax=0.5,
+                )
+                if output_path is not None and not self._processed_fallback_notice_printed:
+                    print(f"[INFO] Writing latest processed depth image to: {output_path.parent}")
+                    self._processed_fallback_notice_printed = True
+        policy_depth_input = self.depth_buffer[:, -2].to(self.device)
+        self._last_depth_trace = {
+            "raw_depth_m": depth_image.detach().cpu().clone(),
+            "processed_capture_depth": processed_image.detach().cpu().clone(),
+            "policy_depth_input": policy_depth_input.detach().cpu().clone(),
+        }
+        return policy_depth_input
+
+    def get_depth_trace(self):
+        return self._last_depth_trace
+
+    def get_isaac_foot_force_norms(self):
+        foot_ids = self._contact_sensor.sensor_data.foot_ids
+        forces = self._contact_sensor.sensor_data.net_forces_w_history[:, 0, foot_ids]
+        return th.norm(forces, dim=-1).squeeze(0)
     
     def _get_contact_fill(
         self,

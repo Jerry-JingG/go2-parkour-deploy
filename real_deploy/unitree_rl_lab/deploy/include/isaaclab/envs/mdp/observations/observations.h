@@ -4,6 +4,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include "isaaclab/envs/manager_based_rl_env.h"
 
@@ -231,13 +232,38 @@ REGISTER_OBSERVATION(parkour_proprio)
     auto last_action_data = env->action_manager->action();
     obs.insert(obs.end(), last_action_data.begin(), last_action_data.end());
 
-    const float contact_threshold = env->cfg["parkour"]["foot_force_threshold"].as<float>(2.0f);
-    const std::array<int, 4> foot_force_est_to_isaac = {1, 0, 3, 2}; // Unitree FR,FL,RR,RL -> Isaac FL,FR,RL,RR
-    for (const int idx : foot_force_est_to_isaac) {
-        obs.push_back((asset->data.foot_force_est[idx] > contact_threshold ? 1.0f : 0.0f) - 0.5f);
+    const float contact_threshold = env_float(
+        "FOOT_FORCE_THRESHOLD",
+        env->cfg["parkour"]["foot_force_threshold"].as<float>(2.0f)
+    );
+    const std::array<int, 4> foot_force_unitree_to_isaac = {1, 0, 3, 2}; // Unitree FR,FL,RR,RL -> Isaac FL,FR,RL,RR
+    for (const int idx : foot_force_unitree_to_isaac) {
+        const bool current_contact = asset->data.foot_force[idx] > contact_threshold;
+        const bool previous_contact = asset->data.foot_contact_prev[idx] > 0.5f;
+        const bool contact = current_contact || previous_contact;
+        asset->data.foot_contact_prev[idx] = current_contact ? 1.0f : 0.0f;
+        obs.push_back((contact ? 1.0f : 0.0f) - 0.5f);
     }
 
     return obs;
+}
+
+REGISTER_OBSERVATION(parkour_raw_foot_force)
+{
+    auto & asset = env->robot;
+    return std::vector<float>(
+        asset->data.foot_force.begin(),
+        asset->data.foot_force.end()
+    );
+}
+
+REGISTER_OBSERVATION(parkour_raw_foot_force_est)
+{
+    auto & asset = env->robot;
+    return std::vector<float>(
+        asset->data.foot_force_est.begin(),
+        asset->data.foot_force_est.end()
+    );
 }
 
 }
